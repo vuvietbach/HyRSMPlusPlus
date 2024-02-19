@@ -7,15 +7,17 @@ import os
 import sys
 import time
 sys.path.append(os.path.abspath(os.curdir))
-
+# sys.path.append(os.path.abspath(os.path.dirname(os.curdir)))
+# for path in sys.path:
+#     print(path)
 from utils.launcher import launch_task
 
-from test import test
-from train import train
-from train_net_few_shot import train_few_shot
-from test_net_few_shot import test_few_shot
-from test_epic_localization import test_epic_localization
-from submission_test import submission_test
+from runs.test import test
+from runs.train import train
+from runs.train_net_few_shot import train_few_shot
+from runs.test_net_few_shot import test_few_shot
+from runs.test_epic_localization import test_epic_localization
+from runs.submission_test import submission_test
 
 from utils.config import Config
 

@@ -1,0 +1,15 @@
+ssv2,5,hyrsm_original,output/hyrsm/5shot/17-02_23-24/it9600_acc0.75.pt,0.6767000555992126
+ssv2,5,hyrsm_sdtw,output/hyrsm/5shot/18-02_04-18/it9600_acc0.74.pt,0.6788000464439392
+ssv2,5,hyrsm_tpm,output/hyrsm_tpm/5shot/18-02_09-24/it10000_acc0.75.pt,0.6782000064849854
+ssv2,5,hyrsm_original,output/hyrsm_original/5shot/18-02_23-40/it2200_acc0.76.pt,0.6849000453948975
+ssv2,5,hyrsm_sdtw,output/hyrsm_sdtw/5shot/19-02_04-27/it2000_acc0.76.pt,0.6874000430107117
+ssv2,5,sdtw,output/hyrsm_tpm/5shot/19-02_09-30/it2200_acc0.76.pt,0.672200083732605
+ssv2,5,sdtw,output/hyrsm_tpm/5shot/19-02_09-30/it2000_acc0.76.pt,0.6769000291824341
+ssv2,5,sdtw,output/hyrsm_tpm/5shot/19-02_09-30/it1600_acc0.76.pt,0.6814000606536865
+ssv2,5,hyrsm_tpm,output/hyrsm_tpm/5shot/18-02_09-24/it10000_acc0.75.pt,0.6684000492095947
+ssv2,5,hyrsm_sdtw,output/hyrsm_sdtw/5shot/19-02_04-27/it2000_acc0.76.pt,0.6725999712944031
+ssv2,5,hyrsm_original,output/hyrsm_original/5shot/18-02_23-40/it2200_acc0.76.pt,0.6735000014305115
+ssv2,5,hyrsm_original,output/hyrsm_original/5shot/18-02_23-40/it4800_acc0.75.pt,0.6814000010490417
+ssv2,5,hyrsm_original,output/hyrsm_original/5shot/18-02_23-40/it2000_acc0.76.pt,0.6772000193595886
+ssv2,5,hyrsm_sdtw,output/hyrsm_sdtw/5shot/19-02_04-27/it2200_acc0.75.pt,0.6737000346183777
+ssv2,5,hyrsm_sdtw,output/hyrsm_sdtw/5shot/19-02_04-27/it4800_acc0.75.pt,0.6756000518798828

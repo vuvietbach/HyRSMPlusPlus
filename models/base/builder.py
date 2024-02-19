@@ -57,7 +57,7 @@ def build_model(cfg, gpu_id=None):
         model_ema = ModelEmaV2(model, decay=cfg.MODEL.EMA.DECAY)
 
     try:
-        # convert batchnorm to be synchronized across 
+        # convert batchnorm to be synchr onized across 
         # different GPUs if needed
         sync_bn = cfg.BN.SYNC_BN
         if sync_bn == True and cfg.NUM_GPUS * cfg.NUM_SHARDS > 1:

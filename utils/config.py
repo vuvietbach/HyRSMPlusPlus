@@ -59,6 +59,12 @@ class Config(object):
             type=str,
         )
         parser.add_argument(
+            "--debug", 
+            action="store_true",
+            default=False,
+            help="whether to turn debug mode on"
+        )
+        parser.add_argument(
             "opts",
             help="other configurations",
             default=None,
@@ -194,43 +200,53 @@ class Config(object):
             assert len(key_split) <= 4, 'Key depth error. \nMaximum depth: 3\n Get depth: {}'.format(
                 len(key_split)
             )
-            assert key_split[0] in cfg.keys(), 'Non-existant key: {}.'.format(
-                key_split[0]
-            )
-            if len(key_split) == 2:
-                assert key_split[1] in cfg[key_split[0]].keys(), 'Non-existant key: {}.'.format(
-                    key
-                )
-            elif len(key_split) == 3:
-                assert key_split[1] in cfg[key_split[0]].keys(), 'Non-existant key: {}.'.format(
-                    key
-                )
-                assert key_split[2] in cfg[key_split[0]][key_split[1]].keys(), 'Non-existant key: {}.'.format(
-                    key
-                )
-            elif len(key_split) == 4:
-                assert key_split[1] in cfg[key_split[0]].keys(), 'Non-existant key: {}.'.format(
-                    key
-                )
-                assert key_split[2] in cfg[key_split[0]][key_split[1]].keys(), 'Non-existant key: {}.'.format(
-                    key
-                )
-                assert key_split[3] in cfg[key_split[0]][key_split[1]][key_split[2]].keys(), 'Non-existant key: {}.'.format(
-                    key
-                )
+            # assert key_split[0] in cfg.keys(), 'Non-existant key: {}.'.format(
+            #     key_split[0]
+            # )
+            # if len(key_split) == 2:
+            #     assert key_split[1] in cfg[key_split[0]].keys(), 'Non-existant key: {}.'.format(
+            #         key
+            #     )
+            # elif len(key_split) == 3:
+            #     assert key_split[1] in cfg[key_split[0]].keys(), 'Non-existant key: {}.'.format(
+            #         key
+            #     )
+            #     assert key_split[2] in cfg[key_split[0]][key_split[1]].keys(), 'Non-existant key: {}.'.format(
+            #         key
+            #     )
+            # elif len(key_split) == 4:
+            #     assert key_split[1] in cfg[key_split[0]].keys(), 'Non-existant key: {}.'.format(
+            #         key
+            #     )
+            #     assert key_split[2] in cfg[key_split[0]][key_split[1]].keys(), 'Non-existant key: {}.'.format(
+            #         key
+            #     )
+            #     assert key_split[3] in cfg[key_split[0]][key_split[1]][key_split[2]].keys(), 'Non-existant key: {}.'.format(
+            #         key
+            #     )
 
 
-            if len(key_split) == 1:
-                cfg[key_split[0]] = vals[idx]
-            elif len(key_split) == 2:
-                cfg[key_split[0]][key_split[1]] = vals[idx]
-            elif len(key_split) == 3:
-                cfg[key_split[0]][key_split[1]][key_split[2]] = vals[idx]
-            elif len(key_split) == 4:
-                cfg[key_split[0]][key_split[1]][key_split[2]][key_split[3]] = vals[idx]
+            if len(key_split) >= 1 :
+                if len(key_split) == 1:
+                    cfg[key_split[0]] = vals[idx]
+                elif not hasattr(cfg, key_split[0]):
+                    cfg[key_split[0]] = {}
+            if len(key_split) >= 2:
+                if len(key_split) == 2:
+                    cfg[key_split[0]][key_split[1]] = vals[idx]
+                elif not hasattr(cfg[key_split[0]], key_split[1]):
+                    cfg[key_split[0]][key_split[1]] = {}
+            if len(key_split) >= 3:
+                if len(key_split) == 3:
+                    cfg[key_split[0]][key_split[1]][key_split[2]] = vals[idx]
+                elif not hasattr(cfg[key_split[0]][key_split[1]], key_split[2]):
+                    cfg[key_split[0]][key_split[1]][key_split[2]] = {}
+            if len(key_split) >= 4:
+                if len(key_split) == 4:
+                    cfg[key_split[0]][key_split[1]][key_split[2]][key_split[3]] = vals[idx]
             
         return cfg
-    
+     
     def _update_dict(self, cfg_dict):
         """
         Set the dict to be attributes of the config recurrently.

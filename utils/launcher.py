@@ -16,7 +16,8 @@ def launch_task(cfg, init_method, func):
         func (function): task to run.
     """
     torch.cuda.empty_cache()
-    if get_num_gpus(cfg) > 1:
+    
+    if int(get_num_gpus(cfg)) > 1:
         if cfg.PAI:
             # if using the PAI cluster, get info from the environment
             cfg.SHARD_ID = int(os.environ['RANK'])

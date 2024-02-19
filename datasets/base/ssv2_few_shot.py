@@ -29,7 +29,7 @@ from datasets.utils.random_erasing import RandomErasing
 
 logger = logging.get_logger(__name__)
 
-
+import numpy as np
 class Split_few_shot():
     """Contains video frame paths and ground truth labels for a single split (e.g. train videos). """
     def __init__(self, folder, split_dataset='train', dataset="Ssv2_few_shot"):
@@ -38,21 +38,21 @@ class Split_few_shot():
         self.gt_a_list = []
         self.videos = []
         self.split_dataset = split_dataset
+        # STEP
+        # if dataset != 'Ssv2_few_shot':
 
-        if dataset == 'Ssv2_few_shot':
-
-            for class_folder in folder:
+        #     for class_folder in folder:
                 
-                paths = class_folder.strip().split('/')[-1]
+        #         paths = class_folder.strip().split('/')[-1]
 
-                class_id = int(class_folder.strip().split('/')[0][len(split_dataset):]) # class_folders.index(class_folder)
-                self.add_vid(paths, class_id)
-        else:
-            for class_folder in folder:
-                paths = class_folder.strip().split('//')[-1]
+        #         class_id = int(class_folder.strip().split('/')[0][len(split_dataset):]) # class_folders.index(class_folder)
+        #         self.add_vid(paths, class_id)
+        # else:
+        for class_folder in folder:
+            paths = class_folder.strip().split('//')[-1]
 
-                class_id = int(class_folder.strip().split('//')[0][len(split_dataset):]) # class_folders.index(class_folder)
-                self.add_vid(paths, class_id)
+            class_id = int(class_folder.strip().split('//')[0][len(split_dataset):]) # class_folders.index(class_folder)
+            self.add_vid(paths, class_id)
 
         logger.info("loaded {} videos from {} dataset: {} !".format(len(self.gt_a_list), split_dataset, dataset))
 
@@ -103,10 +103,8 @@ class Ssv2_few_shot(BaseVideoDataset):
             Returns:
                 dataset_list_name (string)
         """
-
-        name = "{}_few_shot.txt".format(   
-            "train" if self.split == "train" else "test",
-        )
+        # STEP
+        name = "{}_few_shot.txt".format(self.split)
         logger.info("Reading video list from file: {}".format(name))
         return name
 
@@ -139,7 +137,6 @@ class Ssv2_few_shot(BaseVideoDataset):
         self._samples = []
         self._spatial_temporal_index = []
         dataset_list_name = self._get_dataset_list_name()
-
         for retry in range(5):
             try:
                 logger.info("Loading {} dataset list for split '{}'...".format(self.dataset_name, self.split))
@@ -163,6 +160,7 @@ class Ssv2_few_shot(BaseVideoDataset):
                 else:
                     with open(local_file) as f:
                         lines = f.readlines()
+                        lines = [line.strip() for line in lines]
                         for line in lines:
                             for idx in range(self._num_clips):
                                 self._samples.append(line.strip())
@@ -361,10 +359,15 @@ class Ssv2_few_shot(BaseVideoDataset):
         if self.cfg.TRAIN.META_BATCH:
             paths, vid_id = c.get_rand_vid(label, idx) 
             # imgs = self.load_and_transform_paths(paths)
-            if self.dataset_name == 'Ssv2_few_shot':
-                video_path = os.path.join(self.data_root_dir, paths + ".mp4")
-            else:
-                video_path = os.path.join(self.data_root_dir, paths)
+            # if self.dataset_name == 'Ssv2_few_shot':
+            #     video_path = os.path.join(self.data_root_dir, paths + ".mp4")
+            # else:
+            #     video_path = os.path.join(self.data_root_dir, paths)
+            video_path = os.path.join(self.data_root_dir, paths)
+            if hasattr(self.cfg.DATA, "VIDEO_FORMAT"):
+                video_path += self.cfg.DATA.VIDEO_FORMAT
+                
+            
             sample_info = {
                 "path": video_path,
                 # "supervised_label": class_,
@@ -440,10 +443,14 @@ class Ssv2_few_shot(BaseVideoDataset):
         if self.cfg.TRAIN.META_BATCH:
             paths, vid_id = c.get_rand_vid(label, idx) 
             # imgs = self.load_and_transform_paths(paths)
-            if self.dataset_name == 'Ssv2_few_shot':
-                video_path = os.path.join(self.data_root_dir, paths + ".mp4")
-            else:
-                video_path = os.path.join(self.data_root_dir, paths)
+            # if self.dataset_name == 'Ssv2_few_shot':
+            #     video_path = os.path.join(self.data_root_dir, paths + ".mp4")
+            # else:
+            #     video_path = os.path.join(self.data_root_dir, paths)
+            video_path = os.path.join(self.data_root_dir, paths)
+            if hasattr(self.cfg.DATA, "VIDEO_FORMAT"):
+                video_path += self.cfg.DATA.VIDEO_FORMAT
+            
             sample_info = {
                 "path": video_path,
                 # "supervised_label": class_,
@@ -514,6 +521,7 @@ class Ssv2_few_shot(BaseVideoDataset):
 
 
     def __len__(self):
+        return 1000000
         if hasattr(self.cfg.TRAIN, "META_BATCH") and self.split == 'train' and self.cfg.TRAIN.META_BATCH:
             return self.cfg.TRAIN.NUM_SAMPLES
         elif hasattr(self.cfg.TRAIN, "NUM_TEST_TASKS") and self.cfg.TRAIN.NUM_TEST_TASKS:

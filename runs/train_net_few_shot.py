@@ -4,6 +4,7 @@
 """Train a video classification model."""
 import numpy as np
 import pprint
+from utils.utils import CheckpointSaver, get_current_time_str, load_checkpoint, log_test_result, remove_file, save_checkpoint
 import torch
 import torch.nn.functional as F
 import math
@@ -25,7 +26,9 @@ from models.base.builder import build_model
 from datasets.base.builder import build_loader, shuffle_dataset
 
 from datasets.utils.mixup import Mixup
-
+from tqdm import tqdm
+from dotenv import load_dotenv
+import wandb
 logger = logging.get_logger(__name__)
 
 
@@ -54,37 +57,70 @@ def train_epoch(
             norm_train = True
     logger.info(f"Norm training: {norm_train}")
     train_meter.iter_tic()
-    data_size = len(train_loader)
-
-    data_size = cfg.SOLVER.STEPS_ITER     
-    for cur_iter, task_dict in enumerate(train_loader):
+    
+    data_size = cfg.SOLVER.STEPS_ITER    
+    # STEP: TRAIN ITERATION
+    ckpt_saver = CheckpointSaver(cfg.CHECKPOINT.NUM_TO_KEEP)
+    last_ckpt_path = None
+    loader_iter = iter(train_loader) 
+    num_train_tasks = cfg.TRAIN.NUM_TRAIN_TASKS
+    running_train_loss = []
+    running_train_acc = []
+    for cur_iter in tqdm(range(num_train_tasks)):
+        wandb_log = {}
+    # TRAIN ITERATION
+        # STEP: MOVE INPUT TO GPU
+        task_dict = next(loader_iter)
+        for k in task_dict.keys():
+            task_dict[k] = task_dict[k][0]
+        if misc.get_num_gpus(cfg):
+            for k in task_dict.keys():
+                task_dict[k] = task_dict[k].cuda(non_blocking=True)
+        # MOVE INPUT TO GPU      
         
         '''['support_set', 'support_labels', 'target_set', 'target_labels', 'real_target_labels', 'batch_class_list', "real_support_labels"]'''
-        if cur_iter >= cfg.TRAIN.NUM_TRAIN_TASKS:
-                break
-        # Save a checkpoint.
+        # STEP: EVALUATE.
+        val_log = None
         cur_epoch = cur_iter//cfg.SOLVER.STEPS_ITER
         # if (cur_iter + 1) % cfg.TRAIN.VAL_FRE_ITER == 0 and cur_iter>=200:   # 
         if (cur_iter + 1) % cfg.TRAIN.VAL_FRE_ITER == 0:   # 
-            
-            if cfg.OSS.ENABLE:
-                model_bucket_name = cfg.OSS.CHECKPOINT_OUTPUT_PATH.split('/')[2]
-                model_bucket = bu.initialize_bucket(cfg.OSS.KEY, cfg.OSS.SECRET, cfg.OSS.ENDPOINT, model_bucket_name)
-            else:
-                model_bucket = None
+            # if cfg.OSS.ENABLE:
+            #     model_bucket_name = cfg.OSS.CHECKPOINT_OUTPUT_PATH.split('/')[2]
+            #     model_bucket = bu.initialize_bucket(cfg.OSS.KEY, cfg.OSS.SECRET, cfg.OSS.ENDPOINT, model_bucket_name)
+            # else:
+            #     model_bucket = None
             cur_epoch_save = cur_iter//cfg.TRAIN.VAL_FRE_ITER
-            cu.save_checkpoint(cfg.OUTPUT_DIR, model, model_ema, optimizer, cur_epoch_save+cfg.TRAIN.NUM_FOLDS-1, cfg, model_bucket)
+            # cu.save_checkpoint(cfg.OUTPUT_DIR, model, model_ema, optimizer, cur_epoch_save+cfg.TRAIN.NUM_FOLDS-1, cfg, model_bucket)
             
             val_meter.set_model_ema_enabled(False)
-            eval_epoch(val_loader, model, val_meter, cur_epoch_save+cfg.TRAIN.NUM_FOLDS-1, cfg, writer)
-            if model_ema is not None:
-                val_meter.set_model_ema_enabled(True)
-                eval_epoch(val_loader, model_ema.module, val_meter, cur_epoch_save+cfg.TRAIN.NUM_FOLDS-1, cfg, writer)
+            val_log = eval_epoch(val_loader, model, val_meter, cur_epoch_save+cfg.TRAIN.NUM_FOLDS-1, cfg, 'val', writer)
+            
+            wandb_log['val_loss'] = val_log['val_loss']
+            wandb_log['val_acc'] = val_log['val_acc']
+            
+            # STEP: SAVE CHECKPOINT
+            val_acc = val_log['val_acc']
+            save_path = os.path.join(cfg.OUTPUT_DIR, f'it{cur_iter+1}_acc{val_acc:.2f}.pt')
+            if ckpt_saver(val_log['val_acc'], save_path=save_path):
+                save_checkpoint(save_path, model, optimizer, cur_iter+1)
+            
+            if last_ckpt_path != None:
+                remove_file(last_ckpt_path)
+            
+            last_ckpt_path = os.path.join(cfg.OUTPUT_DIR, f'it{cur_iter+1}_acc{val_acc:.2f}_final.pt')
+            save_checkpoint(last_ckpt_path, model, optimizer, cur_iter+1)
+            
             model.train()
 
-        if misc.get_num_gpus(cfg):
-            for k in task_dict.keys():
-                task_dict[k] = task_dict[k][0].cuda(non_blocking=True)
+            # SAVE CHECKPOINT
+            
+            # if model_ema is not None:
+            #     val_meter.set_model_ema_enabled(True)
+            #     eval_epoch(val_loader, model_ema.module, val_meter, cur_epoch_save+cfg.TRAIN.NUM_FOLDS-1, cfg, writer)
+            
+            
+        # EVALUATE
+
             
 
         if mixup_fn is not None:
@@ -92,15 +128,19 @@ def train_epoch(
 
 
         # Update the learning rate.
-        lr = optim.get_epoch_lr(cur_epoch + cfg.TRAIN.NUM_FOLDS * float(cur_iter) / data_size, cfg)
-        optim.set_lr(optimizer, lr)
-
+        if not hasattr(cfg, 'checkpoint_loadpath'):
+            # if not resume training
+            lr = optim.get_epoch_lr(cur_epoch + cfg.TRAIN.NUM_FOLDS * float(cur_iter) / data_size, cfg)
+            optim.set_lr(optimizer, lr)
+        else:
+            lr = optimizer.param_groups[-1]['lr']
+        wandb_log["lr"] = lr
+        
         if cfg.DETECTION.ENABLE:
             # Compute the predictions.
             preds = model(inputs, meta["boxes"])
 
         else:
-           
             model_dict = model(task_dict)
 
         target_logits = model_dict['logits']
@@ -110,6 +150,7 @@ def train_epoch(
                 loss = cfg.TRAIN.USE_CLASSIFICATION_VALUE * F.cross_entropy(model_dict["class_logits"], torch.cat([task_dict["real_support_labels"], task_dict["real_target_labels"]], 0).long()) /cfg.TRAIN.BATCH_SIZE
             elif hasattr(cfg.TRAIN,"USE_LOCAL") and cfg.TRAIN.USE_LOCAL:
                 if hasattr(cfg.TRAIN,"TEMPORAL_LOSS_WEIGHT") and cfg.TRAIN.TEMPORAL_LOSS_WEIGHT:
+                    # this is the loss
                     loss =  (cfg.TRAIN.TEMPORAL_LOSS_WEIGHT*model_dict["loss_temporal_regular"] + F.cross_entropy(model_dict["logits"], task_dict["target_labels"].long()) + cfg.TRAIN.USE_CLASSIFICATION_VALUE * F.cross_entropy(model_dict["class_logits"], torch.cat([task_dict["real_support_labels"], task_dict["real_target_labels"]], 0).unsqueeze(1).repeat(1,cfg.DATA.NUM_INPUT_FRAMES).reshape(-1).long())) /cfg.TRAIN.BATCH_SIZE
                 else:
                     loss =  (F.cross_entropy(model_dict["logits"], task_dict["target_labels"].long()) + cfg.TRAIN.USE_CLASSIFICATION_VALUE * F.cross_entropy(model_dict["class_logits"], torch.cat([task_dict["real_support_labels"], task_dict["real_target_labels"]], 0).unsqueeze(1).repeat(1,cfg.DATA.NUM_INPUT_FRAMES).reshape(-1).long())) /cfg.TRAIN.BATCH_SIZE
@@ -127,6 +168,7 @@ def train_epoch(
             optimizer.zero_grad()
             continue
         loss.backward(retain_graph=False)
+        
         if hasattr(cfg.TRAIN,"CLIP_GRAD_NORM") and cfg.TRAIN.CLIP_GRAD_NORM:
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.TRAIN.CLIP_GRAD_NORM)
 
@@ -167,6 +209,7 @@ def train_epoch(
                 train_meter.update_custom_stats(loss_in_parts)
 
         else:
+            # this is the branch
             top1_err, top5_err = None, None
             if isinstance(task_dict['target_labels'], dict):
                 top1_err_all = {}
@@ -207,6 +250,7 @@ def train_epoch(
                 train_meter.update_custom_stats(top1_err_all)
                 train_meter.update_custom_stats(top5_err_all)
             else:
+                # this is the branch
                 # Compute the errors.
                 preds = target_logits
                 num_topks_correct = metrics.topks_correct(preds, task_dict['target_labels'], (1, 5))
@@ -226,6 +270,9 @@ def train_epoch(
                     top1_err.item(),
                     top5_err.item(),
                 )
+                running_train_loss.append(loss)
+                running_train_acc.append((100-top1_err)/100)
+        
 
             train_meter.iter_toc()
             # Update and log stats.
@@ -254,14 +301,35 @@ def train_epoch(
 
         train_meter.log_iter_stats(cur_epoch, cur_iter)
         train_meter.iter_tic()
+        if (cur_iter + 1) % cfg.TRAIN.LOG_FREQ == 0:
+            num_step = cfg.TRAIN.LOG_FREQ
+            running_train_acc = torch.mean(torch.tensor(running_train_acc)).item()
+            running_train_loss = torch.mean(torch.tensor(running_train_loss)).item()
+            wandb_log[f"train_loss_{num_step}"] = running_train_loss
+            wandb_log[f"train_acc_{num_step}"] = running_train_acc
+            running_train_acc = []
+            running_train_loss = []
+        
+        # LOG WANDB
+        if not hasattr(cfg, 'debug') or not cfg.debug:
+            wandb.log(wandb_log)
+        
+        # LOG WANDB
+    
+    if last_ckpt_path != None:
+        remove_file(last_ckpt_path)
+    last_ckpt_path = os.path.join(cfg.OUTPUT_DIR, f'it{cur_iter+1}_final.pt')
+    save_checkpoint(last_ckpt_path, model, optimizer, cur_iter+1)
 
     # Log epoch stats.
     train_meter.log_epoch_stats(cur_epoch+cfg.TRAIN.NUM_FOLDS-1)
     train_meter.reset()
+    
+    return ckpt_saver
 
 
 @torch.no_grad()
-def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
+def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, split, writer=None):
     """
     Evaluate the model on the val set.
     Args:
@@ -278,14 +346,24 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
     # Evaluation mode enabled. The running stats would not be updated.
     model.eval()
     val_meter.iter_tic()
-
-    for cur_iter, task_dict in enumerate(val_loader):
-        if cur_iter >= cfg.TRAIN.NUM_TEST_TASKS:
-            break
+    # STEP: VAL ITERATION
+    if split == 'test':
+        num_val_tasks = cfg.TRAIN.NUM_TEST_TASKS
+    else:
+        num_val_tasks = cfg.TRAIN.NUM_VAL_TASKS
+    
+    loader_iter = iter(val_loader) 
+    
+    val_loss = []
+    val_acc = []
+    for cur_iter in tqdm(range(num_val_tasks)):
+        task_dict = next(loader_iter)
+        for k in task_dict.keys():
+            task_dict[k] = task_dict[k][0]
         if misc.get_num_gpus(cfg):
-
             for k in task_dict.keys():
-                task_dict[k] = task_dict[k][0].cuda(non_blocking=True)
+                task_dict[k] = task_dict[k].cuda(non_blocking=True)
+    # VAL ITERATION
 
         if cfg.DETECTION.ENABLE:
             # Compute the predictions.
@@ -331,6 +409,7 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
             )
             val_meter.update_predictions(preds, labels)
         else:
+            # this is the branch
             # preds, logits = model(inputs)
             model_dict = model(task_dict)
 
@@ -370,6 +449,7 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
                 val_meter.update_custom_stats(top1_err_all)
                 val_meter.update_custom_stats(top5_err_all)
             else:
+                # this is the branch
                 # Compute the errors.
                 labels = task_dict['target_labels']
                 preds = target_logits
@@ -390,6 +470,10 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
                     top1_err.item(),
                     top5_err.item(),
                 )
+                # STEP UPDATE LOSS AND ACC
+                val_loss.append(loss)
+                val_acc.append((100-top1_err)/100)
+                # UPDATE LOSS AND ACC
             val_meter.iter_toc()
             # Update and log stats.
             val_meter.update_stats(
@@ -433,6 +517,37 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
             )
 
     val_meter.reset()
+    # STEP: COMPUTE AVARAGE VAL LOSS AND ACC
+    val_loss = torch.mean(torch.tensor(val_loss)).item()
+    val_acc = torch.mean(torch.tensor(val_acc)).item()
+    return {"val_loss": val_loss, "val_acc":val_acc}
+    # COMPUTE AVARAGE VAL LOSS AND ACC
+
+def init_session(cfg):
+    # method
+    run_name = 'hyrsm'
+    if hasattr(cfg, "distance_type"):
+        run_name += f'_{cfg.distance_type}'    
+    # num shot
+    num_shot = cfg.TRAIN.SHOT
+    
+    run_name = f'{run_name}/{num_shot}shot'
+    
+    if (hasattr(cfg, 'debug') and cfg.debug) or (hasattr(cfg, 'test_only') and cfg.test_only):
+        cfg.OUTPUT_DIR = 'debug'
+    else:
+        wandb.login(key='835e03fed77f3418a3bcf4cd09a93bf951d32b91')
+        wandb.init(
+            entity="aiotlab", 
+            project="few-shot-action-recognition", 
+            group='sdtw vs tpm', name=run_name
+        )
+        
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, run_name, get_current_time_str())
+    
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    cfg.TRAIN.LOG_FILE = 'log.txt'
+
 
 def train_few_shot(cfg):
     """
@@ -441,15 +556,20 @@ def train_few_shot(cfg):
         cfg (CfgNode): configs. Details can be found in
             slowfast/config/defaults.py
     """
+    cfg.TRAIN.NUM_CLASS = len(cfg.TRAIN.CLASS_NAME)
+    if hasattr(cfg, 'distance_type') and cfg.distance_type == 'tpm':
+        cfg.tempo_prior = float(cfg.tempo_prior)
+    
+    init_session(cfg)
     # Set up environment.
-    du.init_distributed_training(cfg)
+    # du.init_distributed_training(cfg)
     # Set random seed from configs.
     np.random.seed(cfg.RANDOM_SEED)
     torch.manual_seed(cfg.RANDOM_SEED)
     torch.cuda.manual_seed_all(cfg.RANDOM_SEED)
     torch.backends.cudnn.deterministic = True
-
     # Setup logging format.
+    # TODO: update cfg.TRAIN.LOG_FILE
     logging.setup_logging(cfg, cfg.TRAIN.LOG_FILE)
 
     # Print config.
@@ -458,10 +578,11 @@ def train_few_shot(cfg):
         logger.info(pprint.pformat(cfg))
 
     # Build the video model and print model statistics.
+    # TODO: uncomment the following line
     model, model_ema = build_model(cfg)
 
-    if du.is_master_proc() and cfg.LOG_MODEL_INFO:
-        misc.log_model_info(model, cfg, use_train_input=True)
+    # if du.is_master_proc() and cfg.LOG_MODEL_INFO:
+    #     misc.log_model_info(model, cfg, use_train_input=True)
 
     if cfg.OSS.ENABLE:
         model_bucket_name = cfg.OSS.CHECKPOINT_OUTPUT_PATH.split('/')[2]
@@ -473,12 +594,16 @@ def train_few_shot(cfg):
     optimizer = optim.construct_optimizer(model, cfg)
     
     # Load a checkpoint to resume training if applicable.
-    start_epoch = cu.load_train_checkpoint(cfg, model, model_ema, optimizer, model_bucket)
-
+    # start_epoch = cu.load_train_checkpoint(cfg, model, model_ema, optimizer, model_bucket)
+    if hasattr(cfg, 'checkpoint_loadpath'):
+        load_checkpoint(cfg.checkpoint_loadpath, model, optimizer)
+    start_epoch = 0
+    
     # Create the video train and val loaders.
     train_loader = build_loader(cfg, "train")
-    val_loader = build_loader(cfg, "test") if cfg.TRAIN.EVAL_PERIOD != 0 else None  # val
-
+    val_loader = build_loader(cfg, "val") if cfg.TRAIN.EVAL_PERIOD != 0 else None  # val
+    test_loader = build_loader(cfg, 'test')
+    
     # Create meters.
     if cfg.DETECTION.ENABLE:
         train_meter = AVAMeter(len(train_loader), cfg, mode="train")
@@ -510,10 +635,24 @@ def train_few_shot(cfg):
 
     cur_epoch = 0
     shuffle_dataset(train_loader, cur_epoch)
+    if not hasattr(cfg, 'test_only') or not cfg.test_only:
+        ckpt_saver = train_epoch(
+            train_loader, model, model_ema, optimizer, train_meter, cur_epoch, mixup_fn, cfg, writer, val_meter, val_loader
+        )
+        best_ckpt_path = ckpt_saver.get_best_checkpoint_path()
+        load_checkpoint(best_ckpt_path, model)
+    else:
+        best_ckpt_path = cfg.checkpoint_loadpath
+        load_checkpoint(cfg.checkpoint_loadpath, model)  
     
-    train_epoch(
-        train_loader, model, model_ema, optimizer, train_meter, cur_epoch, mixup_fn, cfg, writer, val_meter, val_loader
+    res = eval_epoch(
+        test_loader, model, val_meter, cur_epoch, cfg, 'test', writer
     )
+    
+    log_test_result(
+        cfg, best_ckpt_path, res['val_acc']
+    ) 
+    
     # torch.cuda.empty_cache()
     if writer is not None:
         writer.close()

@@ -20,6 +20,7 @@ from torch.autograd import Variable
 from utils.registry import Registry
 from models.base.backbone import BACKBONE_REGISTRY
 from models.base.base_blocks import HEAD_REGISTRY
+from utils.utils import OTAM_cum_dist_v2, calculate_temporal_prior
 
 
 # MODEL_REGISTRY = Registry("Model")
@@ -120,7 +121,7 @@ class CNN_FSHead(nn.Module):
             backbone = models.resnet34(pretrained=True)
 
         elif self.args.VIDEO.HEAD.BACKBONE_NAME == "resnet50":
-            backbone = models.resnet50(pretrained=True)
+            backbone = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
 
         self.backbone = nn.Sequential(*list(backbone.children())[:last_layer_idx])
 
@@ -734,6 +735,7 @@ class CNN_HyRSM_1shot(CNN_FSHead):
         frame_dists = 1 - frame_sim
         dists = frame_dists
         
+        
         cum_dists = dists.min(3)[0].sum(2) + dists.min(2)[0].sum(2) 
 
         class_dists = [torch.mean(torch.index_select(cum_dists, 1, extract_class_indices(support_labels, c)), dim=1) for c in unique_labels]
@@ -1002,7 +1004,7 @@ class CNN_HyRSM_plusplus_1shot(CNN_FSHead):
     def loss(self, task_dict, model_dict):
         return F.cross_entropy(model_dict["logits"], task_dict["target_labels"].long())
 
-
+from torch.utils.checkpoint import checkpoint
 @HEAD_REGISTRY.register()
 class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
     """
@@ -1066,14 +1068,25 @@ class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
                     temproal_regular_label[i, j] = 1.0
                 
         self.temproal_regular_label = temproal_regular_label.cuda()
+        
+        if hasattr(self.args, 'distance_type') and self.args.distance_type == 'tpm':
+            T = calculate_temporal_prior(cfg.DATA.NUM_INPUT_FRAMES).cuda()
+            self.T = self.args.tempo_prior * (1 - T.unsqueeze(0).unsqueeze(0))        
+            self.T.requires_grad_(False)
 
     def get_feats(self, support_images, target_images, support_labels):
         """
         Takes in images from the support set and query video and returns CNN features.
         """
-        support_features = self.backbone(support_images).squeeze()  # [40, 2048, 7, 7] (5 way - 1 shot - 5 query)
-        target_features = self.backbone(target_images).squeeze()   # [200, 2048, 7, 7]
+        support_images.requires_grad = True
+        target_images.requires_grad = True
         
+        support_features = checkpoint(self.backbone, support_images)  # [200, 2048, 1, 1]
+        target_features = checkpoint(self.backbone, target_images)  # [200, 2048, 1, 1]
+        
+        support_features = support_features.squeeze()
+        target_features = target_features.squeeze()  # [200, 2048, 7, 7]
+
         batch_s = int(support_features.shape[0])
         batch_t = int(target_features.shape[0])
 
@@ -1084,6 +1097,7 @@ class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
 
         support_features = self.relu(self.temporal_atte_before(self.pe(support_features.reshape(-1, self.args.DATA.NUM_INPUT_FRAMES, dim))))   # [25, 8, 2048]
         target_features = self.relu(self.temporal_atte_before(self.pe(target_features.reshape(-1, self.args.DATA.NUM_INPUT_FRAMES, dim))))   # [15, 8, 2048]
+        
         if hasattr(self.args.TRAIN, "USE_CLASSIFICATION") and self.args.TRAIN.USE_CLASSIFICATION:
             if hasattr(self.args.TRAIN, "NUM_CLASS"):
                 class_logits = self.classification_layer(torch.cat([support_features, target_features], 0)).reshape(-1, int(self.args.TRAIN.NUM_CLASS))
@@ -1100,7 +1114,6 @@ class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
 
         support_features_ext = class_prototypes.unsqueeze(0).repeat(Query_num,1,1,1)
         target_features_ext = target_features.unsqueeze(1)
-        
         feature_in = torch.cat([support_features_ext.mean(2), target_features_ext.mean(2)], 1)
         feature_in = self.relu(self.temporal_atte(feature_in, feature_in, feature_in)) 
         support_features = torch.cat([support_features_ext, feature_in[:,:-1,:].unsqueeze(2).repeat(1,1,self.args.DATA.NUM_INPUT_FRAMES,1)], 3).reshape(-1, self.args.DATA.NUM_INPUT_FRAMES, dim*2)
@@ -1108,12 +1121,22 @@ class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
         target_features = self.layer2(torch.cat([target_features.reshape(-1, self.args.DATA.NUM_INPUT_FRAMES, dim), feature_in[:,-1,:].unsqueeze(1).repeat(1,self.args.DATA.NUM_INPUT_FRAMES,1)],2).permute(0,2,1)).permute(0,2,1)
 
         return support_features, target_features, class_logits
+    
+    
+    def compute_distance(self, dists):
+        if not hasattr(self.args, 'distance_type') or self.args.distance_type == 'original':
+            cum_dists = dists.min(3)[0].sum(2) + dists.min(2)[0].sum(2) 
+        elif self.args.distance_type == 'sdtw':
+            cum_dists = OTAM_cum_dist_v2(dists) + OTAM_cum_dist_v2(rearrange(dists, 'tb sb ts ss -> tb sb ss ts'))
+        elif self.args.distance_type == 'tpm':
+            dists *= self.T
+            cum_dists = OTAM_cum_dist_v2(dists) + OTAM_cum_dist_v2(rearrange(dists, 'tb sb ts ss -> tb sb ss ts'))
+        return cum_dists
 
 
     def forward(self, inputs):
         # [200, 3, 224, 224] [4., 4., 0., 2., 0., 3., 3., 4., 3., 1., 4., 2., 2., 1., 1., 0., 2., 1., 1., 0., 3., 2., 0., 3., 4.]  [200, 3, 224, 224]
         support_images, support_labels, target_images = inputs['support_set'], inputs['support_labels'], inputs['target_set'] # [200, 3, 224, 224]
-        
         support_features, target_features, class_logits = self.get_feats(support_images, target_images, support_labels)
         # [35, 5, 8, 2048] [35, 8, 2048] [40, 64]
         unique_labels = torch.unique(support_labels)
@@ -1123,14 +1146,12 @@ class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
         frame_num = support_features.shape[2]
         # F.normalize(support_features, dim=2)
         dim = support_features.shape[-1]
-
         support_features = rearrange(support_features, 'b h s d -> b (h s) d')  # [200, 2048] [35, 40, 2048]
         # target_features = rearrange(target_features, 'b s d -> (b s) d')    # [200, 2048]   [280, 2048]
  
         frame_sim = torch.matmul(F.normalize(support_features, dim=2), F.normalize(target_features, dim=2).permute(0,2,1)).reshape(n_queries, n_support, frame_num, frame_num)
         frame_dists = 1 - frame_sim
         dists = frame_dists
-
         frame_sim_support = torch.matmul(F.normalize(support_features.reshape(-1, self.args.DATA.NUM_INPUT_FRAMES, dim), dim=2), F.normalize(support_features.reshape(-1, self.args.DATA.NUM_INPUT_FRAMES, dim), dim=2).permute(0,2,1)).reshape(n_support*n_queries, frame_num, frame_num)
         frame_dists_support = 1 - frame_sim_support
 
@@ -1143,7 +1164,8 @@ class CNN_HyRSM_plusplus_5shot(CNN_FSHead):
             loss_temporal_regular = torch.mean(frame_dists_support*self.temproal_regular_label*self.temproal_regular + (1-self.temproal_regular_label)*F.relu(self.temproal_regular-frame_dists_support)) + torch.mean(frame_dists_query*self.temproal_regular_label*self.temproal_regular + (1-self.temproal_regular_label)*F.relu(self.temproal_regular-frame_dists_query))
         
         cum_dists_regular = dists
-        cum_dists = dists.min(3)[0].sum(2) + dists.min(2)[0].sum(2) 
+        
+        cum_dists = self.compute_distance(dists)
 
         class_dists = [torch.mean(torch.index_select(cum_dists, 1, extract_class_indices(unique_labels, c)), dim=1) for c in unique_labels]
         class_dists = torch.stack(class_dists)   # [5, 35]
@@ -1301,16 +1323,15 @@ class CNN_HyRSM_plusplus_semi(CNN_FSHead):
 
 
     def forward(self, inputs):
-        # [200, 3, 224, 224] [4., 4., 0., 2., 0., 3., 3., 4., 3., 1., 4., 2., 2., 1., 1., 0., 2., 1., 1., 0., 3., 2., 0., 3., 4.]  [200, 3, 224, 224]
-        support_images, support_labels, target_images = inputs['support_set'], inputs['support_labels'], inputs['target_set'] # [200, 3, 224, 224]
+        # [200, 3, 224, 224] [4., 4., 0., 2., 0., 3., 3., 4., 3., 1., 4., 2., 2., 1., 1., 0., 2., 1., 1., 0., 3., 2., 0., 3., 4.]  [200, 3, 224, 224]        support_images, support_labels, target_images = inputs['support_set'], inputs['support_labels'], inputs['target_set'] # [200, 3, 224, 224]
         if 'target_set_weakly' in inputs:
             support_images_unlabel = inputs["target_set_weakly"]
             use_unlabel=True
         else:
             support_images_unlabel = None
             use_unlabel = False
-        
         support_features, target_features, class_logits = self.get_feats(support_images, target_images, support_labels, support_images_unlabel, use_unlabel)
+
         # [35, 5, 8, 2048] [35, 8, 2048] [40, 64]
         unique_labels = torch.unique(support_labels)
 
