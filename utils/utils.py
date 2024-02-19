@@ -82,6 +82,7 @@ def remove_file(file_path):
         pass
 
 def log_test_result(cfg, checkpoint_path, test_acc):
+    print(f"test accuracy {checkpoint_path}: {test_acc}")
     dataset = cfg.DATA.DATA_ROOT_DIR.split('/')[1]
     
     method = 'hyrsm'
